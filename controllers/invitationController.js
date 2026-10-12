@@ -1,3 +1,5 @@
+
+const mongoose = require("mongoose");
 const Invitation = require("../models/Invitation");
 const Team = require("../models/Team");
 const User = require("../models/User");
@@ -5,14 +7,20 @@ const User = require("../models/User");
 const sendInvitation = async (req, res) => {
 try {
 
-const {
-teamId,
-receiverId
-} = req.body;
+const { teamId, receiverId } = req.body;
 
 if (!teamId || !receiverId) {
 return res.status(400).json({
 message: "Team ID and receiver ID are required"
+});
+}
+
+if (
+!mongoose.isValidObjectId(teamId) ||
+!mongoose.isValidObjectId(receiverId)
+) {
+return res.status(400).json({
+message: "Invalid team ID or student ID"
 });
 }
 
@@ -30,6 +38,12 @@ message: "Only team leader can send invitations"
 });
 }
 
+if (receiverId.toString() === req.user._id.toString()) {
+return res.status(400).json({
+message: "You cannot invite yourself"
+});
+}
+
 const receiver = await User.findById(receiverId);
 
 if (!receiver) {
@@ -38,13 +52,13 @@ message: "Student not found"
 });
 }
 
-const alreadyMember = team.members.some((memberId) => {
+const alreadyMember = team.members.some(memberId => {
 return memberId.toString() === receiverId.toString();
 });
 
 if (alreadyMember) {
 return res.status(400).json({
-message: "Student is already a team member"
+message: "Student is already a member of this team"
 });
 }
 
@@ -62,28 +76,27 @@ status: "Pending"
 
 if (existingInvitation) {
 return res.status(400).json({
-message: "Invitation already sent"
+message: "Invitation already sent to this student"
 });
 }
 
 const invitation = await Invitation.create({
 team: teamId,
 sender: req.user._id,
-receiver: receiverId
+receiver: receiverId,
+status: "Pending"
 });
 
 res.status(201).json({
 message: "Invitation sent successfully",
-invitation: invitation
+invitation
 });
 
 } catch (error) {
-
 res.status(500).json({
 message: "Server error",
 error: error.message
 });
-
 }
 };
 
@@ -94,28 +107,35 @@ const invitations = await Invitation.find({
 receiver: req.user._id
 })
 .populate("team", "teamName projectTitle requiredSkills maxMembers")
-.populate("sender", "name email");
+.populate("sender", "name email")
+.sort({ _id: -1 });
 
 res.status(200).json({
 message: "Invitations fetched successfully",
 count: invitations.length,
-invitations: invitations
+invitations
 });
 
 } catch (error) {
-
 res.status(500).json({
 message: "Server error",
 error: error.message
 });
-
 }
 };
 
 const acceptInvitation = async (req, res) => {
 try {
 
-const invitation = await Invitation.findById(req.params.id);
+const invitationId = req.params.id;
+
+if (!mongoose.isValidObjectId(invitationId)) {
+return res.status(400).json({
+message: "Invalid invitation ID"
+});
+}
+
+const invitation = await Invitation.findById(invitationId);
 
 if (!invitation) {
 return res.status(404).json({
@@ -143,14 +163,11 @@ message: "Team not found"
 });
 }
 
-const alreadyMember = team.members.some((memberId) => {
+const alreadyMember = team.members.some(memberId => {
 return memberId.toString() === req.user._id.toString();
 });
 
 if (alreadyMember) {
-invitation.status = "Accepted";
-await invitation.save();
-
 return res.status(400).json({
 message: "You are already a member of this team"
 });
@@ -162,68 +179,101 @@ message: "Team is already full"
 });
 }
 
-team.members.push(req.user._id);
+const updatedTeam = await Team.findOneAndUpdate(
+{
+_id: team._id,
+members: { $ne: req.user._id },
+$expr: {
+$lt: [
+{ $size: "$members" },
+"$maxMembers"
+]
+}
+},
+{
+$addToSet: {
+members: req.user._id
+}
+},
+{
+new: true
+}
+);
 
-await team.save();
+if (!updatedTeam) {
+return res.status(400).json({
+message: "Team is full or you are already a member"
+});
+}
 
 invitation.status = "Accepted";
 
+try {
 await invitation.save();
+} catch (saveError) {
+await Team.updateOne(
+{ _id: updatedTeam._id },
+{ $pull: { members: req.user._id } }
+);
+throw saveError;
+}
 
 res.status(200).json({
 message: "Invitation accepted successfully",
-team: team
+team: updatedTeam
 });
 
 } catch (error) {
-
 res.status(500).json({
 message: "Server error",
 error: error.message
 });
-
 }
 };
 
 const rejectInvitation = async (req, res) => {
 try {
 
-const invitation = await Invitation.findById(req.params.id);
+const invitationId = req.params.id;
+
+if (!mongoose.isValidObjectId(invitationId)) {
+return res.status(400).json({
+message: "Invalid invitation ID"
+});
+}
+
+const invitation = await Invitation.findOneAndUpdate(
+{
+_id: invitationId,
+receiver: req.user._id,
+status: "Pending"
+},
+{
+$set: {
+status: "Rejected"
+}
+},
+{
+new: true
+}
+);
 
 if (!invitation) {
-return res.status(404).json({
-message: "Invitation not found"
-});
-}
-
-if (invitation.receiver.toString() !== req.user._id.toString()) {
-return res.status(403).json({
-message: "You cannot reject this invitation"
-});
-}
-
-if (invitation.status !== "Pending") {
 return res.status(400).json({
-message: "Invitation already processed"
+message: "Invitation not found, unauthorized, or already processed"
 });
 }
-
-invitation.status = "Rejected";
-
-await invitation.save();
 
 res.status(200).json({
 message: "Invitation rejected successfully",
-invitation: invitation
+invitation
 });
 
 } catch (error) {
-
 res.status(500).json({
 message: "Server error",
 error: error.message
 });
-
 }
 };
 
