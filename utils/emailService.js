@@ -1,89 +1,102 @@
+const RESEND_API_URL = "https://api.resend.com/emails";
 
-const nodemailer = require("nodemailer");
+const sendEmail = async ({ to, subject, html }) => {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.EMAIL_FROM || "onboarding@resend.dev";
 
-const createTransporter = () => {
-if (!process.env.EMAIL_USER || !process.env.EMAIL_APP_PASSWORD) {
-throw new Error("Email sender credentials are missing");
-}
+  if (!apiKey) {
+    throw new Error("RESEND_API_KEY is missing");
+  }
 
-return nodemailer.createTransport({
-service: "gmail",
-auth: {
-user: process.env.EMAIL_USER,
-pass: process.env.EMAIL_APP_PASSWORD.replace(/\s/g, "")
-},
-connectionTimeout: 15000,
-socketTimeout: 20000
-});
+  const response = await fetch(RESEND_API_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from,
+      to: [to],
+      subject,
+      html,
+    }),
+  });
+
+  const result = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    console.error("Resend API error:", result);
+    throw new Error(
+      result.message ||
+        result.error ||
+        `Email sending failed with status ${response.status}`
+    );
+  }
+
+  console.log("Email accepted by Resend:", result.id);
+  return result;
 };
 
+const escapeHtml = (value) =>
+  String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
 const sendVerificationEmail = async (email, verificationUrl) => {
-const transporter = createTransporter();
+  const safeUrl = escapeHtml(verificationUrl);
 
-await transporter.sendMail({
-from: process.env.EMAIL_USER,
-to: email,
-subject: "Verify Your Email - Student Team Formation",
-text:
-`Welcome to Student Team Formation!
-
-Verify your email address using this link:
-
-${verificationUrl}
-
-This link expires in 15 minutes.
-
-If you did not register, ignore this email.`,
-html: `
-<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;padding:24px">
-<h2>Student Team Formation</h2>
-<p>Thank you for registering.</p>
-<p>Click the button below to verify your email address.</p>
-<p style="margin:30px 0">
-<a href="${verificationUrl}"
-style="background:#2563eb;color:white;padding:14px 22px;text-decoration:none;border-radius:8px">
-Verify Your Email Address
-</a>
-</p>
-<p>This verification link expires in 15 minutes.</p>
-<p>If you did not register, you can ignore this email.</p>
-</div>`
-});
-
-console.log("Verification email sent successfully to:", email);
+  return sendEmail({
+    to: email,
+    subject: "Verify Your Email - Student Team Formation",
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px;color:#1f2937">
+        <h2 style="color:#2563eb">Verify Your Email</h2>
+        <p>Thank you for registering with Student Team Formation.</p>
+        <p>Please click below to verify your email address.</p>
+        <p style="margin:24px 0">
+          <a href="${safeUrl}"
+             style="background:#2563eb;color:#ffffff;padding:12px 20px;text-decoration:none;border-radius:6px;display:inline-block">
+            Verify Email
+          </a>
+        </p>
+        <p>This verification link expires in 15 minutes.</p>
+        <p>If you did not create this account, you can ignore this email.</p>
+        <hr style="border:none;border-top:1px solid #e5e7eb">
+        <p style="font-size:12px;color:#6b7280">Student Team Formation</p>
+      </div>
+    `,
+  });
 };
 
 const sendPasswordResetEmail = async (email, resetUrl) => {
-const transporter = createTransporter();
+  const safeUrl = escapeHtml(resetUrl);
 
-await transporter.sendMail({
-from: process.env.EMAIL_USER,
-to: email,
-subject: "Reset Your Password - Student Team Formation",
-text:
-`Click the link below to reset your password:
-
-${resetUrl}
-
-This link expires in 15 minutes.
-
-If you did not request this, ignore this email.`,
-html: `
-<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;padding:24px">
-<h2>Reset Your Password</h2>
-<p>Click below to set a new password.</p>
-<p style="margin:30px 0">
-<a href="${resetUrl}"
-style="background:#2563eb;color:white;padding:14px 22px;text-decoration:none;border-radius:8px">
-Reset Password
-</a>
-</p>
-<p>This link expires in 15 minutes.</p>
-</div>`
-});
+  return sendEmail({
+    to: email,
+    subject: "Password Reset - Student Team Formation",
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px;color:#1f2937">
+        <h2 style="color:#2563eb">Reset Your Password</h2>
+        <p>We received a request to reset your password.</p>
+        <p>Click below to reset your password.</p>
+        <p style="margin:24px 0">
+          <a href="${safeUrl}"
+             style="background:#2563eb;color:#ffffff;padding:12px 20px;text-decoration:none;border-radius:6px;display:inline-block">
+            Reset Password
+          </a>
+        </p>
+        <p>This password reset link expires in 15 minutes.</p>
+        <p>If you did not request a password reset, you can ignore this email.</p>
+        <hr style="border:none;border-top:1px solid #e5e7eb">
+        <p style="font-size:12px;color:#6b7280">Student Team Formation</p>
+      </div>
+    `,
+  });
 };
 
 module.exports = {
-sendVerificationEmail,
-sendPasswordResetEmail
+  sendVerificationEmail,
+  sendPasswordResetEmail,
 };
