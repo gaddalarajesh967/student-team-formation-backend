@@ -5,7 +5,6 @@ const Invitation = require("../models/Invitation");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
-
 const { sendPasswordResetEmail } = require("../utils/emailService");
 
 const LINK_EXPIRY = 15 * 60 * 1000;
@@ -37,8 +36,61 @@ const formatUser = user => ({
   isEmailVerified: user.isEmailVerified
 });
 
+const verifyTurnstile = async token => {
+  if (!token || typeof token !== "string" || token.length > 2048) {
+    return false;
+  }
+
+  if (!process.env.TURNSTILE_SECRET) {
+    throw new Error("TURNSTILE_SECRET is not configured");
+  }
+
+  const response = await fetch(
+    "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams({
+        secret: process.env.TURNSTILE_SECRET,
+        response: token
+      }),
+      signal: AbortSignal.timeout(10000)
+    }
+  );
+
+  if (!response.ok) {
+    return false;
+  }
+
+  const result = await response.json();
+
+  return (
+    result.success === true &&
+    result.hostname === "student-team-formation-web.onrender.com"
+  );
+};
+
 const registerUser = async (req, res) => {
   try {
+    let captchaValid;
+
+    try {
+      captchaValid = await verifyTurnstile(req.body.captchaToken);
+    } catch (error) {
+      console.error("CAPTCHA verification error:", error.message);
+      return res.status(503).json({
+        message: "CAPTCHA verification is temporarily unavailable"
+      });
+    }
+
+    if (!captchaValid) {
+      return res.status(400).json({
+        message: "Please complete CAPTCHA verification"
+      });
+    }
+
     const {
       name,
       password,
@@ -193,8 +245,7 @@ const forgotPassword = async (req, res) => {
     const resetToken = generateToken();
 
     user.resetTokenHash = hashToken(resetToken);
-    user.resetTokenExpiresAt =
-      new Date(Date.now() + LINK_EXPIRY);
+    user.resetTokenExpiresAt = new Date(Date.now() + LINK_EXPIRY);
 
     await user.save();
 
