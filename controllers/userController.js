@@ -1,4 +1,3 @@
-
 const User = require("../models/User");
 const Team = require("../models/Team");
 const Invitation = require("../models/Invitation");
@@ -37,11 +36,20 @@ const formatUser = user => ({
 });
 
 const verifyTurnstile = async token => {
-  if (!token || typeof token !== "string" || token.length > 2048) {
-    return false;
+  if (
+    !token ||
+    typeof token !== "string" ||
+    token.length > 2048
+  ) {
+    return {
+      valid: false,
+      reason: "CAPTCHA token is missing or invalid"
+    };
   }
 
-  if (!process.env.TURNSTILE_SECRET) {
+  const secret = process.env.TURNSTILE_SECRET;
+
+  if (!secret) {
     throw new Error("TURNSTILE_SECRET is not configured");
   }
 
@@ -53,7 +61,7 @@ const verifyTurnstile = async token => {
         "Content-Type": "application/x-www-form-urlencoded"
       },
       body: new URLSearchParams({
-        secret: process.env.TURNSTILE_SECRET,
+        secret,
         response: token
       }),
       signal: AbortSignal.timeout(10000)
@@ -61,31 +69,81 @@ const verifyTurnstile = async token => {
   );
 
   if (!response.ok) {
-    return false;
+    console.error(
+      "Cloudflare Siteverify HTTP error:",
+      response.status
+    );
+
+    return {
+      valid: false,
+      reason: "Cloudflare verification request failed"
+    };
   }
 
   const result = await response.json();
 
-  return (
-    result.success === true &&
-    result.hostname === "student-team-formation-web.onrender.com"
-  );
+  if (!result.success) {
+    console.error(
+      "Cloudflare CAPTCHA rejected:",
+      result["error-codes"] || []
+    );
+
+    return {
+      valid: false,
+      reason: "Cloudflare rejected the CAPTCHA token"
+    };
+  }
+
+  const allowedHostnames = [
+    "localhost",
+    "127.0.0.1",
+    "student-team-formation-web.onrender.com"
+  ];
+
+  if (!allowedHostnames.includes(result.hostname)) {
+    console.error(
+      "Unexpected CAPTCHA hostname:",
+      result.hostname
+    );
+
+    return {
+      valid: false,
+      reason: "CAPTCHA hostname does not match"
+    };
+  }
+
+  return {
+    valid: true,
+    hostname: result.hostname
+  };
 };
 
 const registerUser = async (req, res) => {
   try {
-    let captchaValid;
+    let captchaResult;
 
     try {
-      captchaValid = await verifyTurnstile(req.body.captchaToken);
+      captchaResult = await verifyTurnstile(
+        req.body.captchaToken
+      );
     } catch (error) {
-      console.error("CAPTCHA verification error:", error.message);
+      console.error(
+        "CAPTCHA verification error:",
+        error.message
+      );
+
       return res.status(503).json({
-        message: "CAPTCHA verification is temporarily unavailable"
+        message:
+          "CAPTCHA verification is temporarily unavailable"
       });
     }
 
-    if (!captchaValid) {
+    if (!captchaResult.valid) {
+      console.error(
+        "CAPTCHA validation failed:",
+        captchaResult.reason
+      );
+
       return res.status(400).json({
         message: "Please complete CAPTCHA verification"
       });
@@ -116,7 +174,10 @@ const registerUser = async (req, res) => {
       });
     }
 
-    if (typeof password !== "string" || password.length < 8) {
+    if (
+      typeof password !== "string" ||
+      password.length < 8
+    ) {
       return res.status(400).json({
         message: "Password must be at least 8 characters"
       });
@@ -141,7 +202,9 @@ const registerUser = async (req, res) => {
       skills: Array.isArray(skills) ? skills : [],
       interests: Array.isArray(interests) ? interests : [],
       availability:
-        typeof availability === "boolean" ? availability : true,
+        typeof availability === "boolean"
+          ? availability
+          : true,
       experience: experience || "Beginner",
       profilePhoto: "",
       isEmailVerified: true
@@ -245,7 +308,9 @@ const forgotPassword = async (req, res) => {
     const resetToken = generateToken();
 
     user.resetTokenHash = hashToken(resetToken);
-    user.resetTokenExpiresAt = new Date(Date.now() + LINK_EXPIRY);
+    user.resetTokenExpiresAt = new Date(
+      Date.now() + LINK_EXPIRY
+    );
 
     await user.save();
 
