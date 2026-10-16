@@ -1,3 +1,4 @@
+
 const User = require("../models/User");
 const Team = require("../models/Team");
 const Invitation = require("../models/Invitation");
@@ -35,43 +36,116 @@ const formatUser = user => ({
   isEmailVerified: user.isEmailVerified
 });
 
+/* ---------------- TURNSTILE CAPTCHA ---------------- */
+
 const verifyTurnstile = async token => {
   if (
-    !token ||
     typeof token !== "string" ||
+    !token.trim() ||
     token.length > 2048
   ) {
+    console.error("Turnstile: token missing or invalid");
+
     return {
       valid: false,
-      reason: "CAPTCHA token is missing or invalid"
+      reason: "Missing or invalid CAPTCHA token"
     };
   }
 
   const secret = process.env.TURNSTILE_SECRET;
 
-  if (!secret) {
-    throw new Error("TURNSTILE_SECRET is not configured");
+  if (typeof secret !== "string" || !secret.trim()) {
+    console.error("Turnstile: TURNSTILE_SECRET is missing");
+
+    return {
+      valid: false,
+      reason: "Server CAPTCHA secret is not configured"
+    };
   }
 
-  const response = await fetch(
-    "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      body: new URLSearchParams({
-        secret,
-        response: token
-      }),
-      signal: AbortSignal.timeout(10000)
-    }
-  );
+  try {
+    const response = await fetch(
+      "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          secret: secret.trim(),
+          response: token.trim()
+        }),
+        signal: AbortSignal.timeout(10000)
+      }
+    );
 
-  if (!response.ok) {
+    // Read the response body even when Cloudflare returns HTTP 400.
+    const responseText = await response.text();
+
+    let result;
+
+    try {
+      result = JSON.parse(responseText);
+    } catch {
+      result = {
+        message: responseText.slice(0, 500)
+      };
+    }
+
+    console.error("Turnstile HTTP status:", response.status);
+
+    if (!response.ok) {
+      console.error(
+        "Turnstile HTTP error details:",
+        JSON.stringify(result)
+      );
+
+      return {
+        valid: false,
+        reason: "Cloudflare Siteverify returned HTTP " +
+          response.status
+      };
+    }
+
+    console.log("Turnstile verification result:", {
+      success: result.success,
+      hostname: result.hostname,
+      errorCodes: result["error-codes"]
+    });
+
+    if (result.success !== true) {
+      return {
+        valid: false,
+        reason: "Cloudflare rejected the CAPTCHA token"
+      };
+    }
+
+    const allowedHostnames = [
+      "student-team-formation-web.onrender.com",
+      "localhost",
+      "127.0.0.1"
+    ];
+
+    if (!allowedHostnames.includes(result.hostname)) {
+      console.error(
+        "Turnstile hostname mismatch:",
+        result.hostname
+      );
+
+      return {
+        valid: false,
+        reason: "CAPTCHA hostname mismatch"
+      };
+    }
+
+    return {
+      valid: true,
+      hostname: result.hostname
+    };
+  } catch (error) {
     console.error(
-      "Cloudflare Siteverify HTTP error:",
-      response.status
+      "Turnstile network/request error:",
+      error.message
     );
 
     return {
@@ -79,64 +153,15 @@ const verifyTurnstile = async token => {
       reason: "Cloudflare verification request failed"
     };
   }
-
-  const result = await response.json();
-
-  if (!result.success) {
-    console.error(
-      "Cloudflare CAPTCHA rejected:",
-      result["error-codes"] || []
-    );
-
-    return {
-      valid: false,
-      reason: "Cloudflare rejected the CAPTCHA token"
-    };
-  }
-
-  const allowedHostnames = [
-    "localhost",
-    "127.0.0.1",
-    "student-team-formation-web.onrender.com"
-  ];
-
-  if (!allowedHostnames.includes(result.hostname)) {
-    console.error(
-      "Unexpected CAPTCHA hostname:",
-      result.hostname
-    );
-
-    return {
-      valid: false,
-      reason: "CAPTCHA hostname does not match"
-    };
-  }
-
-  return {
-    valid: true,
-    hostname: result.hostname
-  };
 };
+
+/* ---------------- REGISTER ---------------- */
 
 const registerUser = async (req, res) => {
   try {
-    let captchaResult;
-
-    try {
-      captchaResult = await verifyTurnstile(
-        req.body.captchaToken
-      );
-    } catch (error) {
-      console.error(
-        "CAPTCHA verification error:",
-        error.message
-      );
-
-      return res.status(503).json({
-        message:
-          "CAPTCHA verification is temporarily unavailable"
-      });
-    }
+    const captchaResult = await verifyTurnstile(
+      req.body?.captchaToken
+    );
 
     if (!captchaResult.valid) {
       console.error(
@@ -210,9 +235,18 @@ const registerUser = async (req, res) => {
       isEmailVerified: true
     });
 
+    const jwtSecret = process.env.JWT_SECRET;
+
+    if (!jwtSecret) {
+      console.error("JWT_SECRET is not configured");
+      return res.status(500).json({
+        message: "Server configuration error"
+      });
+    }
+
     const token = jwt.sign(
       { id: user._id },
-      process.env.JWT_SECRET,
+      jwtSecret,
       { expiresIn: "7d" }
     );
 
@@ -235,6 +269,8 @@ const registerUser = async (req, res) => {
     });
   }
 };
+
+/* ---------------- LOGIN ---------------- */
 
 const loginUser = async (req, res) => {
   try {
@@ -266,9 +302,17 @@ const loginUser = async (req, res) => {
       });
     }
 
+    const jwtSecret = process.env.JWT_SECRET;
+
+    if (!jwtSecret) {
+      return res.status(500).json({
+        message: "Server configuration error"
+      });
+    }
+
     const token = jwt.sign(
       { id: user._id },
-      process.env.JWT_SECRET,
+      jwtSecret,
       { expiresIn: "7d" }
     );
 
@@ -285,6 +329,8 @@ const loginUser = async (req, res) => {
     });
   }
 };
+
+/* ---------------- FORGOT PASSWORD ---------------- */
 
 const forgotPassword = async (req, res) => {
   try {
@@ -328,6 +374,8 @@ const forgotPassword = async (req, res) => {
     });
   }
 };
+
+/* ---------------- RESET PASSWORD ---------------- */
 
 const resetPassword = async (req, res) => {
   try {
@@ -378,6 +426,8 @@ const resetPassword = async (req, res) => {
   }
 };
 
+/* ---------------- GET PROFILE ---------------- */
+
 const getProfile = async (req, res) => {
   try {
     const user = await User.findById(req.user._id)
@@ -401,6 +451,8 @@ const getProfile = async (req, res) => {
     });
   }
 };
+
+/* ---------------- SEARCH STUDENTS ---------------- */
 
 const searchStudents = async (req, res) => {
   try {
@@ -514,6 +566,8 @@ const searchStudents = async (req, res) => {
   }
 };
 
+/* ---------------- UPDATE PROFILE ---------------- */
+
 const updateProfile = async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
@@ -577,6 +631,8 @@ const updateProfile = async (req, res) => {
     });
   }
 };
+
+/* ---------------- DELETE ACCOUNT ---------------- */
 
 const deleteAccount = async (req, res) => {
   try {
